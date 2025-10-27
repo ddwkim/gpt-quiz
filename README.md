@@ -1,5 +1,7 @@
 # Quiz from ChatGPT Shared Link
 
+![App screenshot](.asset/image.png)
+
 Web app that converts a ChatGPT shared conversation into:
 - A structured, gradable quiz (MCQ / True‑False / Short‑answer)
 - A Mermaid diagram that summarizes the transcript visually
