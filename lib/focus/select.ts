@@ -1,6 +1,38 @@
 import type { FocusProfile } from '@/lib/types';
 
-export type Snippet = { text: string; score: number };
+export type Snippet = { text: string; score: number; index: number };
+
+const ACTION_VERBS = [
+  'align',
+  'allocate',
+  'bootstrap',
+  'build',
+  'canon',
+  'canonicalize',
+  'clean',
+  'configure',
+  'connect',
+  'deploy',
+  'emit',
+  'enforce',
+  'generate',
+  'hydrate',
+  'instrument',
+  'merge',
+  'optimize',
+  'orchestrate',
+  'persist',
+  'prune',
+  'refine',
+  'render',
+  'route',
+  'schedule',
+  'transform',
+  'validate'
+];
+
+const CAUSAL_MARKERS = ['because', 'therefore', 'so that', 'thus', 'hence', 'thereby', 'due to', 'leads to', 'results in'];
+const CONFIG_TERMS = ['config', 'configuration', 'flag', 'feature', 'toggle', 'env', 'environment', 'option', 'parameter', 'setting'];
 
 export function selectForFocus(
   transcript: string,
@@ -19,28 +51,55 @@ export function selectForFocus(
 
   const penalties = new Set((focus.exclude ?? []).map((s) => s.toLowerCase()));
 
-  const scored: Snippet[] = parts.map((text) => {
+  const keywordHits = parts.map((text) => {
     const t = text.toLowerCase();
     let score = 0;
-    for (const kw of keywords) if (t.includes(kw)) score += 3;
-    for (const term of penalties) if (t.includes(term)) score -= 2;
-    if (/[A-Za-z_][A-Za-z0-9_]*\s*->/.test(text) || /TopK|softmax|router|batch/i.test(text)) score += 1;
-    return { text, score };
+    for (const kw of keywords) if (t.includes(kw)) score += 5;
+    for (const term of penalties) if (t.includes(term)) score -= 4;
+    const actionMatches = ACTION_VERBS.reduce((acc, verb) => (t.includes(verb) ? acc + 1 : acc), 0);
+    score += actionMatches * 1.2;
+    const causalMatches = CAUSAL_MARKERS.reduce((acc, marker) => (t.includes(marker) ? acc + 1 : acc), 0);
+    score += causalMatches * 1.5;
+    const configMatches = CONFIG_TERMS.reduce((acc, term) => (t.includes(term) ? acc + 1 : acc), 0);
+    score += configMatches;
+    if (/[A-Za-z_][A-Za-z0-9_]*\s*-->\s*[A-Za-z_]/.test(text)) score += 1;
+    return score;
   });
 
-  scored.sort((a, b) => b.score - a.score);
+  const scored: Snippet[] = parts.map((text, index) => {
+    let score = keywordHits[index];
+    if (score > 0) {
+      for (let delta = -2; delta <= 2; delta++) {
+        if (delta === 0) continue;
+        const neighbor = keywordHits[index + delta];
+        if (neighbor && neighbor > 0) score += 0.6;
+      }
+    }
+    return { text, score, index };
+  });
+
+  const ranked = [...scored].sort((a, b) => b.score - a.score || a.index - b.index);
 
   let buf = '';
-  for (const s of scored) {
-    if (s.score < 1) break;
+  const selected = new Set<number>();
+  for (const s of ranked) {
+    if (s.score <= 0) break;
     if ((buf + ' ' + s.text).length > maxChars) break;
     buf += (buf ? '\n' : '') + s.text;
+    selected.add(s.index);
   }
-  if (!buf) buf = parts.slice(0, 20).join('\n');
+  if (!buf) {
+    buf = parts.slice(0, 20).join('\n');
+  } else {
+    const ordered = [...selected].sort((a, b) => a - b);
+    buf = ordered.map((idx) => parts[idx]).join('\n');
+  }
 
-  const rationale = `topic="${focus.topic}", mustInclude=${(focus.mustInclude || []).join(',')}, exclude=${
-    (focus.exclude || []).join(',')
-  }`;
+  const rationale = [
+    `topic="${focus.topic}"`,
+    `mustInclude=${(focus.mustInclude || []).join(',') || 'none'}`,
+    `exclude=${(focus.exclude || []).join(',') || 'none'}`,
+    `sentences=${selected.size || Math.min(parts.length, 20)}`
+  ].join(', ');
   return { excerpt: buf, rationale };
 }
-

@@ -1,105 +1,80 @@
-import type { DiagramIR, FlowchartIR } from './schema';
+import type { DiagramIR, FlowchartIR, NodeIR } from '@/lib/mermaid/schema';
+import { sanitizeLabelText, pickSafeShape } from '@/lib/mermaid/sanitize';
 
-function getIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  const n = raw === undefined ? NaN : Number(raw);
-  return Number.isFinite(n) ? n : fallback;
+const EDGE_LABEL_WHITESPACE = /\s+/g;
+
+function sanitizeSegments(node: NodeIR): string[] {
+  const raws = node.labelLines && node.labelLines.length ? node.labelLines : [node.label ?? ''];
+  const segments = raws
+    .map((seg) => sanitizeLabelText(seg))
+    .filter((seg) => seg.length > 0);
+  if (!segments.length) {
+    segments.push(sanitizeLabelText(node.label ?? node.id) || node.id);
+  }
+  return segments.slice(0, 6);
 }
 
-const esc = (s: string) =>
-  String(s)
-    .replace(/[“”«»„‟]/g, '"')
-    .replace(/[‘’‚‛]/g, "'")
-    .replace(/[\u2013\u2014]/g, '-')
-    .replace(/…/g, '...')
-    .replace(/"/g, '\\"');
+function nodeShape(node: NodeIR, segments: string[]): 'rect' | 'decision' | 'terminator' {
+  const preferred = node.shape === 'decision' || node.shape === 'terminator' ? node.shape : 'rect';
+  return pickSafeShape(preferred, segments);
+}
 
-function wordWrap(text: string, width: number, maxLines: number): string {
-  if (width <= 0 || maxLines <= 0) return text;
-  const words = String(text).split(/\s+/);
-  const lines: string[] = [];
-  let current = '';
-  for (const w of words) {
-    if (current.length === 0) {
-      current = w;
-    } else if ((current + ' ' + w).length <= width) {
-      current += ' ' + w;
+function renderNode(node: NodeIR): string {
+  const segments = sanitizeSegments(node);
+  const shape = nodeShape(node, segments);
+  const label = segments.join('<br/>');
+  if (shape === 'decision') return `${node.id}{"${label}"}`;
+  if (shape === 'terminator') return `${node.id}("${label}")`;
+  return `${node.id}["${label}"]`;
+}
+
+function renderSubgraphs(ir: FlowchartIR, lines: string[]) {
+  if (!ir.subgraphs?.length) return;
+  const altDirection = ir.direction === 'TB' || ir.direction === 'BT' ? 'LR' : 'TB';
+  for (const sg of ir.subgraphs) {
+    const title = sanitizeLabelText(sg.title, { banBrackets: true, banHtml: true, banQuotes: true });
+    const safeTitle = title || 'Group';
+    lines.push(`subgraph "${safeTitle}"`);
+    if (sg.nodeIds.length > 1) {
+      lines.push(`  direction ${altDirection}`);
+    }
+    for (const id of sg.nodeIds) {
+      lines.push(`  ${id}`);
+    }
+    lines.push('end');
+  }
+}
+
+function sanitizeEdgeLabel(label?: string): string | undefined {
+  if (!label) return undefined;
+  const cleaned = sanitizeLabelText(label).replace(EDGE_LABEL_WHITESPACE, ' ').slice(0, 30);
+  return cleaned.length ? cleaned : undefined;
+}
+
+function renderEdges(ir: FlowchartIR, lines: string[]) {
+  for (const edge of ir.edges) {
+    const label = sanitizeEdgeLabel(edge.label ?? edge.kind);
+    if (label) {
+      lines.push(`${edge.from} -- ${label} --> ${edge.to}`);
     } else {
-      lines.push(current);
-      current = w;
-      if (lines.length >= maxLines) break;
+      lines.push(`${edge.from} --> ${edge.to}`);
     }
   }
-  if (lines.length < maxLines && current) lines.push(current);
-  if (words.length && lines.join(' ').length < text.length && lines.length >= maxLines) {
-    const last = lines[lines.length - 1];
-    lines[lines.length - 1] = last.length >= 2 ? last.slice(0, Math.max(0, width - 1)) + '…' : last + '…';
-  }
-  return lines.join('<br/>');
-}
-
-function wrapNodeLabel(text: string, widthChars: number, maxLines: number): string {
-  if (widthChars <= 0 || maxLines <= 0) return esc(text);
-  return esc(wordWrap(text, widthChars, maxLines));
-}
-
-function wrapEdgeLabel(text: string, widthChars: number): string {
-  const s = esc(text);
-  if (widthChars <= 0 || s.length <= widthChars) return s;
-  return s.slice(0, Math.max(0, widthChars - 1)) + '…';
 }
 
 function compileFlowchart(ir: FlowchartIR): string {
-  const defaultWrap = getIntEnv('MERMAID_LABEL_WRAP', 28);
-  const defaultMaxLines = getIntEnv('MERMAID_LABEL_MAX_LINES', 4);
-  const nodeWrap = ir.style?.wrapLabelsAt ?? defaultWrap;
-  const maxLines = defaultMaxLines;
-  const edgeWrap = Math.max(nodeWrap, getIntEnv('MERMAID_EDGE_LABEL_WRAP', 40));
-  const out: string[] = [`flowchart ${ir.direction}`];
-
-  // nodes
-  for (const nd of ir.nodes) {
-    out.push(`${nd.id}["${wrapNodeLabel(nd.label, nodeWrap, maxLines)}"]`);
-    if (nd.note) out.push(`%% note ${nd.id}: ${wrapEdgeLabel(nd.note, Math.max(edgeWrap, 80))}`);
+  const lines: string[] = [`flowchart ${ir.direction}`];
+  for (const node of ir.nodes) {
+    lines.push(renderNode(node));
   }
-
-  // subgraphs
-  if (ir.subgraphs?.length) {
-    for (const sg of ir.subgraphs) {
-      out.push(`subgraph ${sg.id}["${wrapNodeLabel(sg.title, nodeWrap, maxLines)}"]`);
-      for (const nid of sg.nodes) out.push(`  ${nid}`);
-      out.push('end');
-    }
-  }
-
-  // optional: group-focused nodes into subgraphs by node.group
-  const groups = new Map<string, string[]>();
-  for (const nd of ir.nodes) {
-    if (nd.group) {
-      const list = groups.get(nd.group) || [];
-      list.push(nd.id);
-      groups.set(nd.group, list);
-    }
-  }
-  if (groups.size > 0) {
-    for (const [g, ids] of groups.entries()) {
-      const sgId = `grp_${g.replace(/[^A-Za-z0-9_]/g, '_')}`;
-      out.push(`subgraph ${sgId}["${wrapNodeLabel(g, nodeWrap, maxLines)}"]`);
-      for (const id of ids) out.push(`  ${id}`);
-      out.push('end');
-    }
-  }
-
-  // edges
-  for (const e of ir.edges) {
-    const lab = e.label ? `|${wrapEdgeLabel(e.label, edgeWrap)}|` : '';
-    out.push(`${e.from} -->${lab} ${e.to}`);
-  }
-
-  return out.join('\n');
+  renderSubgraphs(ir, lines);
+  renderEdges(ir, lines);
+  return lines.join('\n');
 }
 
 export function compileToMermaid(ir: DiagramIR): string {
-  if (ir.kind === 'flowchart') return compileFlowchart(ir);
+  if (ir.kind === 'flowchart') {
+    return compileFlowchart(ir);
+  }
   throw new Error(`Unsupported kind: ${(ir as any).kind}`);
 }

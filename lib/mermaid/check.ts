@@ -1,123 +1,253 @@
-// Static checks for Mermaid source prior to parsing.
+const HEADER_RE = /^(flowchart|graph|sequenceDiagram|classDiagram|erDiagram|stateDiagram|mindmap)\b/i;
+const RESERVED = new Set([
+  'end',
+  'subgraph',
+  'graph',
+  'classdef',
+  'style',
+  'linkstyle',
+  'click',
+  'acctitle',
+  'accdescr',
+  'flowchart',
+  'sequencediagram',
+  'classdiagram',
+  'erdiagram',
+  'statediagram',
+  'mindmap'
+]);
+
+export type StaticIssueCode =
+  | 'HEADER/MISSING'
+  | 'TOKEN/RESERVED'
+  | 'TOKEN/LEADING_DIGIT'
+  | 'TOKEN/DUPLICATE_ID'
+  | 'TOKEN/UNSUPPORTED_CHAR'
+  | 'TOKEN/CLOSER_IN_LABEL'
+  | 'TOKEN/HTML_IN_LABEL'
+  | 'TOKEN/QUOTE_NOISE'
+  | 'BLOCK/UNBALANCED'
+  | 'BLOCK/SUBGRAPH_TITLE'
+  | 'ARITY/ORPHAN_EDGE'
+  | 'SIZE/DEGREE_CAP'
+  | 'LABEL/EDGE_QUOTE'
+  | 'LABEL/NON_ASCII';
 
 export type StaticIssue = {
-  code: 'MISSING_HEADER' | 'UNCLOSED_SUBGRAPH' | 'UNBALANCED_QUOTES' | 'INVALID_EDGE_SYNTAX' | 'RESERVED_KEYWORD' | 'UNICODE_PUNCT' | 'TOO_LONG_LABEL' | 'BACKSLASH_QUOTE';
+  code: StaticIssueCode;
   message: string;
   severity: 'low' | 'medium' | 'high';
   line?: number;
+  meta?: Record<string, unknown>;
 };
 
 export type StaticCheckResult = { ok: boolean; issues: StaticIssue[] };
 
-// Returns true if a double quote is escaped by a backslash
-function isEscaped(text: string, index: number) {
-  let backslashes = 0;
-  let i = index - 1;
-  while (i >= 0 && text[i] === '\\') {
-    backslashes += 1;
-    i -= 1;
-  }
-  return backslashes % 2 === 1;
+const EDGE_RE = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*--\s*(?:([A-Za-z_][A-Za-z0-9_]*)\s+)?-->\s*([A-Za-z_][A-Za-z0-9_]*)\s*$/;
+const NODE_RE = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*[\[\(\{><]/;
+const SUBGRAPH_RE = /^\s*subgraph\s+(.+?)\s*$/i;
+const END_RE = /^\s*end\s*$/i;
+
+function asciiOnly(text: string): boolean {
+  return /^[\x00-\x7F]*$/.test(text);
 }
-
-export function checkBalancedQuotes(source: string): { ok: boolean; issues: Array<{ line: number; text: string; quoteCount: number }> } {
-  const lines = source.replace(/\r\n?/g, '\n').split('\n');
-  const issues: Array<{ line: number; text: string; quoteCount: number }> = [];
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
-    const line = raw.trim();
-    // Skip comments and obvious header lines
-    if (line.startsWith('%%')) continue;
-    if (/^(flowchart|graph|sequenceDiagram|classDiagram|erDiagram|stateDiagram|mindmap)\b/.test(line)) continue;
-
-    let quotes = 0;
-    for (let j = 0; j < raw.length; j++) {
-      if (raw[j] === '"' && !isEscaped(raw, j)) quotes += 1;
-    }
-    if (quotes % 2 !== 0) {
-      issues.push({ line: i + 1, text: raw, quoteCount: quotes });
-    }
-  }
-  return { ok: issues.length === 0, issues };
-}
-
-const HEADER_RE = /^(flowchart|graph|sequenceDiagram|classDiagram|erDiagram|stateDiagram|mindmap)\b/;
 
 export function checkStaticMermaid(source: string, type: 'flowchart' | 'sequence' | 'class' | 'er' | 'state' | 'mindmap'): StaticCheckResult {
+  void type;
   const issues: StaticIssue[] = [];
   const lines = source.replace(/\r\n?/g, '\n').split('\n');
-
-  // 1) Header on first non-empty/non-comment line
-  const first = lines.find((l) => l.trim() && !l.trim().startsWith('%%'))?.trim() || '';
-  if (!HEADER_RE.test(first)) {
-    issues.push({ code: 'MISSING_HEADER', message: 'First non-comment line must be the diagram header', severity: 'high', line: 1 });
-  }
-
-  // 2) Unbalanced quotes per line
-  const qc = checkBalancedQuotes(source);
-  for (const q of qc.issues) {
-    issues.push({ code: 'UNBALANCED_QUOTES', message: 'Odd number of unescaped double quotes on line', severity: 'high', line: q.line });
-  }
-
-  // 3) Unclosed subgraphs (simple counter)
+  let headerSeen = false;
+  const nodeIds = new Map<string, number>();
+  const degree = new Map<string, number>();
+  const edges: Array<{ from: string; to: string; label?: string; line: number }> = [];
   const stack: number[] = [];
+
   for (let i = 0; i < lines.length; i++) {
-    const t = lines[i].trim();
-    if (t.startsWith('%%')) continue;
-    if (/^subgraph\b/.test(t)) stack.push(i + 1);
-    else if (/^end\b/.test(t)) stack.pop();
+    const raw = lines[i];
+    const text = raw.trim();
+    if (!text) continue;
+    if (text.startsWith('%%')) continue;
+
+    if (!headerSeen && HEADER_RE.test(text)) {
+      headerSeen = true;
+      continue;
+    }
+
+    const subgraphMatch = SUBGRAPH_RE.exec(text);
+    if (subgraphMatch) {
+      const titleRaw = subgraphMatch[1].replace(/^\w+\s*/, '');
+      const title = titleRaw.replace(/\[[^\]]*\]$/, '').replace(/^"|"$/g, '');
+      if (!asciiOnly(title) || title.includes(':') || title.includes('"')) {
+        issues.push({
+          code: 'BLOCK/SUBGRAPH_TITLE',
+          message: 'Subgraph titles must be ASCII without quotes or colons',
+          severity: 'medium',
+          line: i + 1
+        });
+      }
+      stack.push(i + 1);
+      continue;
+    }
+
+    if (END_RE.test(text)) {
+      stack.pop();
+      continue;
+    }
+
+    const edgeMatch = EDGE_RE.exec(text);
+    if (edgeMatch) {
+      const [, from, label, to] = edgeMatch;
+      edges.push({ from, to, label: label?.trim() || undefined, line: i + 1 });
+      degree.set(from, (degree.get(from) ?? 0) + 1);
+      degree.set(to, (degree.get(to) ?? 0) + 1);
+      if (label && /['"]/.test(label)) {
+        issues.push({
+          code: 'LABEL/EDGE_QUOTE',
+          message: 'Edge labels must not contain quotes',
+          severity: 'medium',
+          line: i + 1
+        });
+      }
+      if (label && !asciiOnly(label)) {
+        issues.push({
+          code: 'LABEL/NON_ASCII',
+          message: 'Edge labels must be ASCII',
+          severity: 'medium',
+          line: i + 1
+        });
+      }
+      continue;
+    }
+
+    const nodeMatch = NODE_RE.exec(text);
+    if (nodeMatch) {
+      const id = nodeMatch[1];
+      if (/^[0-9]/.test(id)) {
+        issues.push({
+          code: 'TOKEN/LEADING_DIGIT',
+          message: `Node id "${id}" starts with a digit`,
+          severity: 'high',
+          line: i + 1
+        });
+      }
+      const lower = id.toLowerCase();
+      if (RESERVED.has(lower)) {
+        issues.push({
+          code: 'TOKEN/RESERVED',
+          message: `Reserved keyword cannot be used as id: ${id}`,
+          severity: 'high',
+          line: i + 1
+        });
+      }
+      if (!asciiOnly(id)) {
+        issues.push({
+          code: 'TOKEN/UNSUPPORTED_CHAR',
+          message: `Node id "${id}" must be ASCII`,
+          severity: 'high',
+          line: i + 1
+        });
+      }
+      if (nodeIds.has(id)) {
+        issues.push({
+          code: 'TOKEN/DUPLICATE_ID',
+          message: `Duplicate node id "${id}"`,
+          severity: 'high',
+          line: i + 1
+        });
+      } else {
+        nodeIds.set(id, i + 1);
+      }
+
+      const rawLabel = (() => {
+        const rectIdx = raw.indexOf('["');
+        if (rectIdx >= 0) {
+          const end = raw.indexOf('"]', rectIdx + 2);
+          if (end > rectIdx) return raw.slice(rectIdx + 2, end);
+        }
+        const decIdx = raw.indexOf('{"');
+        if (decIdx >= 0) {
+          const end = raw.indexOf('"}', decIdx + 2);
+          if (end > decIdx) return raw.slice(decIdx + 2, end);
+        }
+        const termIdx = raw.indexOf('("');
+        if (termIdx >= 0) {
+          const end = raw.indexOf('")', termIdx + 2);
+          if (end > termIdx) return raw.slice(termIdx + 2, end);
+        }
+        return undefined;
+      })();
+
+      if (rawLabel !== undefined) {
+        const labelNoBr = rawLabel.replace(/<br\/>/gi, '');
+        if (/[\]\}\)]/.test(labelNoBr)) {
+          issues.push({
+            code: 'TOKEN/CLOSER_IN_LABEL',
+            message: `Label for "${id}" contains a closing bracket character`,
+            severity: 'high',
+            line: i + 1
+          });
+        }
+        if (/[<>\u003C\u003E]/.test(labelNoBr)) {
+          issues.push({
+            code: 'TOKEN/HTML_IN_LABEL',
+            message: `Label for "${id}" contains HTML-like tokens`,
+            severity: 'high',
+            line: i + 1
+          });
+        }
+        if (/['"]/.test(labelNoBr)) {
+          issues.push({
+            code: 'TOKEN/QUOTE_NOISE',
+            message: `Label for "${id}" contains quotes`,
+            severity: 'medium',
+            line: i + 1
+          });
+        }
+      }
+      continue;
+    }
   }
+
+  if (!headerSeen) {
+    issues.push({
+      code: 'HEADER/MISSING',
+      message: 'First non-comment line must be the diagram header',
+      severity: 'high',
+      line: 1
+    });
+  }
+
   if (stack.length > 0) {
-    issues.push({ code: 'UNCLOSED_SUBGRAPH', message: `Unclosed subgraph starting at line ${stack[0]}`, severity: 'high', line: stack[0] });
+    issues.push({
+      code: 'BLOCK/UNBALANCED',
+      message: `Unclosed subgraph starting at line ${stack[0]}`,
+      severity: 'high',
+      line: stack[0]
+    });
   }
 
-  // 4) Invalid edge tokens: detect single-dash arrow A -> B (without --, -.-, ==>), or Unicode dashes
-  const invalidEdgeRe = /(^|\s)[A-Za-z][A-Za-z0-9_]*\s*->\s*[A-Za-z][A-Za-z0-9_]*/;
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
-    const t = raw.trim();
-    if (t.startsWith('%%')) continue;
-    if (HEADER_RE.test(t)) continue;
-    if (/[\u2013\u2014]/.test(raw)) {
-      issues.push({ code: 'UNICODE_PUNCT', message: 'Unicode dash detected; use ASCII hyphen', severity: 'medium', line: i + 1 });
-    }
-    if (invalidEdgeRe.test(raw) && !/-->|-\.->|==>/.test(raw)) {
-      issues.push({ code: 'INVALID_EDGE_SYNTAX', message: 'Use A --> B, -.->, or ==> (not A -> B)', severity: 'high', line: i + 1 });
-    }
-  }
-
-  // 5) Reserved keyword as node id
-  const reserved = new Set(['end', 'subgraph', 'classDef', 'style', 'linkStyle', 'click', 'accTitle', 'accDescr', 'flowchart', 'graph', 'sequenceDiagram', 'classDiagram', 'erDiagram', 'stateDiagram', 'mindmap']);
-  const nodeDecl = /(^|\s)([A-Za-z][A-Za-z0-9_]*)\s*\[/;
-  for (let i = 0; i < lines.length; i++) {
-    const m = nodeDecl.exec(lines[i]);
-    if (m) {
-      const id = m[2];
-      if (reserved.has(id)) {
-        issues.push({ code: 'RESERVED_KEYWORD', message: `Reserved keyword used as node id: ${id}`, severity: 'medium', line: i + 1 });
-      }
+  for (const edge of edges) {
+    if (!nodeIds.has(edge.from) || !nodeIds.has(edge.to)) {
+      issues.push({
+        code: 'ARITY/ORPHAN_EDGE',
+        message: `Edge references missing node: ${edge.from} --> ${edge.to}`,
+        severity: 'high',
+        line: edge.line
+      });
     }
   }
 
-  // 6) Labels too long inside brackets
-  const labelRe = /\[(.*?)\]/g;
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
-    let m: RegExpExecArray | null;
-    labelRe.lastIndex = 0;
-    while ((m = labelRe.exec(raw))) {
-      const label = m[1] || '';
-      if (label.length > 100) {
-        issues.push({ code: 'TOO_LONG_LABEL', message: 'Label too long (>100 chars); shorten', severity: 'low', line: i + 1 });
-      }
-      if (/[“”‘’…•]/.test(label)) {
-        issues.push({ code: 'UNICODE_PUNCT', message: 'Unicode punctuation in label; use ASCII', severity: 'medium', line: i + 1 });
-      }
-      if (/\\"/.test(label)) {
-        issues.push({ code: 'BACKSLASH_QUOTE', message: 'Avoid backslash-escaped quotes (\\"); prefer apostrophes or plain text', severity: 'medium', line: i + 1 });
-      }
+  for (const [id, deg] of degree.entries()) {
+    if (deg > 12) {
+      issues.push({
+        code: 'SIZE/DEGREE_CAP',
+        message: `Node "${id}" exceeds degree cap (degree=${deg})`,
+        severity: 'medium',
+        line: nodeIds.get(id)
+      });
     }
   }
 
-  return { ok: issues.filter((x) => x.severity !== 'low').length === 0, issues };
+  const ok = !issues.some((issue) => issue.severity === 'high');
+  return { ok, issues };
 }

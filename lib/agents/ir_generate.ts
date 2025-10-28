@@ -1,23 +1,34 @@
 import { DiagramIRSchema, type DiagramIR } from '@/lib/mermaid/schema';
 import { callJson } from '@/lib/openai-client';
 
-export const IR_SYSTEM = `
-You generate JSON IR for a Mermaid flowchart (not Mermaid text). Return ONLY JSON matching the provided schema.
+const EDGE_LABELS = 'causes, leads_to, computes, depends_on, configures, constrains, reads_from, writes_to, validates, triggers, emits';
 
-Contract:
-- Output fields: kind="flowchart", direction in {TB,BT,LR,RL}, nodes[], edges[], optional subgraphs[], style.wrapLabelsAt.
-- IDs must match ^[A-Za-z0-9_]+$; human labels go in label; may add optional weight and group.
-- Keep labels concise; abbreviate where needed.
- - Prefer hierarchical detail: 2–3 layers where useful. Use group to cluster focus-critical nodes (caller may assign subgraph title).
- - Use edge labels to encode relation type (causes, leads_to, computes, depends_on, configures, constrains). Keep labels short.
-
-Reliability:
-- Deterministic; low temperature set upstream.
-- No commentary, no code fences, no Mermaid.
-`;
+export const IR_SYSTEM = [
+  'You generate JSON IR for a Mermaid flowchart (not Mermaid text). Return ONLY strict JSON that matches the provided schema.',
+  '',
+  'Hard requirements:',
+  '- kind="flowchart"; direction in {TB,BT,LR,RL}.',
+  '- Node ids: ^[A-Za-z_][A-Za-z0-9_]*$, ASCII only, not reserved keywords (end, subgraph, graph, classDef, style, linkStyle, click, accTitle, accDescr, flowchart, sequenceDiagram, classDiagram, erDiagram, stateDiagram, mindmap).',
+  '- Labels: ASCII, <=60 chars, concise; trim filler like "Step" or "Process".',
+  `- Shapes: choose from rect, decision, terminator, io, db, subroutine, stadium, circle, double_circle, hexagon, parallelogram, trap.`,
+  `- Edge labels optional; if provided, use whitelist (${EDGE_LABELS}).`,
+  '- Subgraphs (optional): { title, nodeIds[] } with title ASCII <=60 chars, nodeIds referencing existing nodes.',
+  '- Style (optional): wrapLabelsAt (12..60), nodeSpacing/rankSpacing (50..120), renderer in {dagre, elk}.',
+  '- Preserve existing ids when refining upstream output unless invalid.',
+  '- Include weight to rank importance (higher = more central). Use group to cluster related nodes.',
+  "- ABSOLUTE LABEL BAN LIST: Labels must not contain [, ], {, }, (, ), <, >, \" or ' characters. Rewrite these tokens (e.g., [→LB, ]→RB, remove quotes) before emitting.",
+  '- No HTML in labels. Use line segmentation (see below) and let the compiler render multi-line labels.',
+  '- Multi-line labels: emit as labelLines: string[] in the IR instead of embedding <br/>. Each line obeys the same ban list.',
+  '- Preserve IDs; never inject shape tokens into labels.',
+  '- If a label cannot be expressed without banned chars, drop the least important tokens first (by weight) until the ban holds.',
+  '',
+  'Reliability:',
+  '- Deterministic ordering; prefer most important nodes first.',
+  '- No comments, prose, code fences, or Mermaid.'
+].join('\n');
 
 export function buildIRUserPrompt(spec: string, direction: 'TB' | 'BT' | 'LR' | 'RL') {
-  return [`Task: derive a flowchart IR from the following spec.`, `Direction: ${direction}`, `Spec:\n${spec}`].join('\n\n');
+  return [`Task: derive a semantic flowchart IR from the following spec.`, `Direction: ${direction}`, `Spec:\n${spec}`].join('\n\n');
 }
 
 export async function generateIRFromSpec(
@@ -48,19 +59,18 @@ export function buildIRUserPromptFromFocus(
   const dir = focus.direction ?? 'TB';
 
   return [
-    `Task: Build a *flowchart* IR centered strictly on the TOPIC and constraints below.`,
+    `Task: Build a flowchart IR centered on the TOPIC and constraints below. Respect budgets and schema invariants.`,
     `TOPIC: ${focus.topic}`,
     `MUST INCLUDE (as nodes or explicit labels): ${include}`,
-    `EXCLUDE (do not include as nodes or labels): ${exclude}`,
+    `EXCLUDE (omit from nodes and labels): ${exclude}`,
     `HARD BUDGETS: maxNodes=${maxN}, maxEdges=${maxE}`,
     `DIRECTION: ${dir}`,
-    `Structure: prefer 2–3 layers of detail with small branching factor. Use group for the most central nodes (subgraph title may be "${focus.subgraphTitle ?? 'Focus'}").`,
-    `Edges: add short relation labels (causes, leads_to, computes, depends_on, configures, constrains).`,
-    `Content: include concise formulas/decision rules as labels when they help comprehension (e.g., key equations).`,
-    `Budget policy: keep mustInclude even if low-weight; when over budget, drop the lowest-weight, off-topic items first.`,
-    `Fallback: if detail exceeds budgets, collapse off-topic into 1–2 aggregate nodes (e.g., "Other steps").`,
-    `Priority: nodes that directly explain the TOPIC’s mechanism/causality. Assign higher weight to central items.`,
-    `SOURCE EXCERPT (already filtered to be relevant):`,
+    `Shapes: choose semantic shapes from the whitelist; leave unset when default rectangle is fine.`,
+    `Edge labels: optional; if used, choose from ${EDGE_LABELS}.`,
+    `Weight: prioritize central causal steps and decisions; higher weight = more critical.`,
+    `Group: cluster major subsystems; caller may map groups to subgraphs.`,
+    `Budget policy: preserve mustInclude + decision nodes; drop lowest-weight off-topic items first.`,
+    `SOURCE EXCERPT (filtered for relevance):`,
     transcriptExcerpt
   ].join('\n');
 }

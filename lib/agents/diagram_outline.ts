@@ -1,29 +1,26 @@
 import { DiagramIRSchema, type DiagramIR } from '@/lib/mermaid/schema';
 import { callJson } from '@/lib/openai-client';
 
-export const OUTLINE_SYSTEM = `
-You produce a MINIMAL JSON IR for a Mermaid flowchart (not Mermaid text). Return ONLY JSON matching the provided schema.
+const EDGE_LABELS = 'causes, leads_to, computes, depends_on, configures, constrains, reads_from, writes_to, validates, triggers, emits';
 
-Goal:
-- Build a coarse, big-picture IR with very simple, safe constructs that parse reliably.
-
-Contract:
-- Output: kind="flowchart", direction in {TB,BT,LR,RL}, nodes[], edges[]. No styles, no classes.
-- IDs: ^[A-Za-z0-9_]+$; human labels in label; ASCII punctuation.
-- Edge labels optional; keep short if used. Prefer unlabeled edges at this stage.
-- Do NOT emit subgraphs in the outline stage.
-
-Budgets:
-- Outline budgets are small (e.g., nodes ≤ 6, edges ≤ 8). Caller will refine later.
-
-Reliability:
-- Deterministic; do not include commentary or Mermaid.
-
-Strict IR Rules (to ensure later Mermaid validity):
-- IDs: ASCII, ^[A-Za-z0-9_]+$, not reserved (end, subgraph, graph, classDef, style, linkStyle, click, accTitle, accDescr, flowchart, sequenceDiagram, classDiagram, erDiagram, stateDiagram, mindmap).
-- Labels: ASCII punctuation; avoid embedded unmatched quotes; keep labels concise (<=100 chars).
-- Edges: represent as simple A --> B in the compiled Mermaid; avoid fancy connectors at this stage.
-`;
+export const OUTLINE_SYSTEM = [
+  'You produce a MINIMAL JSON IR for a Mermaid flowchart. Return ONLY JSON that matches the provided schema.',
+  '',
+  'Constraints:',
+  '- kind="flowchart"; direction in {TB,BT,LR,RL}; omit subgraphs at this stage.',
+  '- Node ids: ^[A-Za-z_][A-Za-z0-9_]*$, ASCII, not reserved keywords.',
+  '- Labels: ASCII <=60 chars; no commentary; keep short.',
+  '- Shapes: use rect by default; only assign decision/terminator when unquestionably needed.',
+  `- Edges: A --> B; edge labels optional but if used choose from ${EDGE_LABELS}.`,
+  '- Style: omit unless caller budgets demand wrapLabelsAt.',
+  '- Budget friendly: maxNodes and maxEdges are strict; produce spine of most critical steps only.',
+  '- Preserve ids from input samples when refining; otherwise derive stable, semantic ids.',
+  "- ABSOLUTE LABEL BAN LIST: Labels must not contain [, ], {, }, (, ), <, >, \" or ' characters. Rewrite these tokens (e.g., [→LB, ]→RB, remove quotes) before emitting.",
+  '- No HTML in labels. Use line segmentation (see below) and let the compiler render multi-line labels.',
+  '- Multi-line labels: emit as labelLines: string[] in the IR instead of embedding <br/>. Each line obeys the same ban list.',
+  '- Preserve IDs; never inject shape tokens into labels.',
+  '- If a label cannot be expressed without banned chars, drop the least important tokens first (by weight) until the ban holds.'
+].join('\n');
 
 export function buildOutlineUserPrompt(
   topic: string,
@@ -35,7 +32,7 @@ export function buildOutlineUserPrompt(
   maxEdges = 8
 ) {
   return [
-    `Task: Produce a minimal *flowchart* IR for the TOPIC using only simple nodes and A --> B edges.`,
+    `Task: Produce a minimal flowchart IR for the TOPIC using only the most critical steps.`,
     `TOPIC: ${topic}`,
     `MUST INCLUDE: ${mustInclude.join(', ') || 'None'}`,
     `EXCLUDE: ${exclude.join(', ') || 'None'}`,

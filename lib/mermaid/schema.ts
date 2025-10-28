@@ -1,32 +1,34 @@
-export type Direction = 'TB' | 'BT' | 'LR' | 'RL';
-export type DiagramKind = 'flowchart';
+import type { IR, IRNode, IREdge, IRStyle } from '@/lib/ir/schema';
 
-export type NodeIR = { id: string; label: string; note?: string; weight?: number; group?: string };
-export type EdgeIR = { from: string; to: string; label?: string; weight?: number };
+export type Direction = IR['direction'];
+export type DiagramKind = IR['kind'];
 
-export type SubgraphIR = {
-  id: string;
-  title: string;
-  nodes: string[];
-};
+export type DiagramIR = IR;
+export type FlowchartIR = IR;
+export type NodeIR = IRNode;
+export type EdgeIR = IREdge;
+export type DiagramIRStyle = IRStyle;
 
-export type FlowchartIR = {
-  kind: 'flowchart';
-  direction: Direction;
-  nodes: NodeIR[];
-  edges: EdgeIR[];
-  subgraphs?: SubgraphIR[];
-  style?: { wrapLabelsAt?: number };
-};
-
-export type DiagramIR = FlowchartIR; // extensible later
+export const EDGE_LABEL_WHITELIST = [
+  'causes',
+  'leads_to',
+  'computes',
+  'depends_on',
+  'configures',
+  'constrains',
+  'reads_from',
+  'writes_to',
+  'validates',
+  'triggers',
+  'emits'
+] as const;
 
 export const DiagramIRSchema = {
   name: 'diagram_ir',
-  strict: true,
+  strict: false,
   schema: {
     type: 'object',
-    required: ['kind', 'direction', 'nodes', 'edges', 'subgraphs', 'style'],
+    required: ['kind', 'direction', 'nodes', 'edges'],
     additionalProperties: false,
     properties: {
       kind: { enum: ['flowchart'] },
@@ -35,14 +37,34 @@ export const DiagramIRSchema = {
         type: 'array',
         items: {
           type: 'object',
-          required: ['id', 'label', 'note', 'weight', 'group'],
+          required: ['id', 'label'],
           additionalProperties: false,
           properties: {
-            id: { type: 'string', pattern: '^[A-Za-z0-9_]+' },
-            label: { type: 'string' },
-            note: { type: 'string' },
+            id: { type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$' },
+            label: { type: 'string', maxLength: 80 },
+            labelLines: {
+              type: 'array',
+              items: { type: 'string', maxLength: 60 },
+              minItems: 1,
+              maxItems: 6
+            },
+            shape: { enum: ['rect', 'decision', 'terminator', 'io', 'db', 'subroutine', 'stadium', 'circle', 'double_circle', 'hexagon', 'parallelogram', 'trap'] },
             weight: { type: 'number' },
-            group: { type: 'string' }
+            group: { type: 'string', maxLength: 60 },
+            evidence: {
+              type: 'array',
+              items: {
+                type: 'object',
+                required: ['role', 'turn', 'start', 'end'],
+                additionalProperties: false,
+                properties: {
+                  role: { enum: ['user', 'assistant'] },
+                  turn: { type: 'integer', minimum: 0 },
+                  start: { type: 'integer', minimum: 0 },
+                  end: { type: 'integer', minimum: 0 }
+                }
+              }
+            }
           }
         }
       },
@@ -50,13 +72,27 @@ export const DiagramIRSchema = {
         type: 'array',
         items: {
           type: 'object',
-          required: ['from', 'to', 'label', 'weight'],
+          required: ['from', 'to'],
           additionalProperties: false,
           properties: {
-            from: { type: 'string', pattern: '^[A-Za-z0-9_]+' },
-            to: { type: 'string', pattern: '^[A-Za-z0-9_]+' },
-            label: { type: 'string' },
-            weight: { type: 'number' }
+            from: { type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$' },
+            to: { type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$' },
+            label: { type: 'string', maxLength: 40 },
+            kind: { enum: EDGE_LABEL_WHITELIST },
+            evidence: {
+              type: 'array',
+              items: {
+                type: 'object',
+                required: ['role', 'turn', 'start', 'end'],
+                additionalProperties: false,
+                properties: {
+                  role: { enum: ['user', 'assistant'] },
+                  turn: { type: 'integer', minimum: 0 },
+                  start: { type: 'integer', minimum: 0 },
+                  end: { type: 'integer', minimum: 0 }
+                }
+              }
+            }
           }
         }
       },
@@ -64,20 +100,23 @@ export const DiagramIRSchema = {
         type: 'array',
         items: {
           type: 'object',
-          required: ['id', 'title', 'nodes'],
+          required: ['title', 'nodeIds'],
           additionalProperties: false,
           properties: {
-            id: { type: 'string', pattern: '^[A-Za-z0-9_]+' },
-            title: { type: 'string' },
-            nodes: { type: 'array', items: { type: 'string', pattern: '^[A-Za-z0-9_]+' } }
+            title: { type: 'string', maxLength: 80 },
+            nodeIds: { type: 'array', items: { type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$' }, minItems: 1 }
           }
         }
       },
       style: {
         type: 'object',
         additionalProperties: false,
-        properties: { wrapLabelsAt: { type: 'integer', minimum: 10, maximum: 80 } },
-        required: ['wrapLabelsAt']
+        properties: {
+          wrapLabelsAt: { type: 'integer', minimum: 12, maximum: 60 },
+          nodeSpacing: { type: 'integer', minimum: 50, maximum: 120 },
+          rankSpacing: { type: 'integer', minimum: 50, maximum: 120 },
+          renderer: { enum: ['dagre', 'elk'] }
+        }
       }
     }
   }

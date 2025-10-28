@@ -6,6 +6,8 @@ Web app that converts a ChatGPT shared conversation into:
 - A structured, gradable quiz (MCQ / True‑False / Short‑answer)
 - A Mermaid diagram that summarizes the transcript visually
 
+This code is written in Codex.
+
 Server routes fetch the shared page, extract the transcript, and call the OpenAI Responses API using Structured Outputs (JSON Schema). The client renders quizzes for grading/rationales and diagrams with export options.
 
 Contents
