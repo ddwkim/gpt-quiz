@@ -1,101 +1,80 @@
 'use client';
+
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { basicSanitize } from '@/lib/mermaid/sanitize';
-import type { Diagram } from '@/lib/diagram';
-type SupportedDiagramType = 'flowchart' | 'sequence' | 'class' | 'er' | 'state' | 'mindmap';
-const SUPPORTED_TYPES = new Set<SupportedDiagramType>(['flowchart', 'sequence', 'class', 'er', 'state', 'mindmap']);
-const DEFAULT_DIAGRAM_TYPE: SupportedDiagramType = 'flowchart';
+import type { DiagramUnit } from '@/lib/ir/schema';
+import { ExportButtons } from './ExportButtons';
 
-export default function DiagramView({ diagram }: { diagram: Diagram }) {
+export interface PngControlOptions {
+  scale: number;
+  padding: number;
+  background: string;
+}
+
+export interface DiagramPanelProps {
+  unit: DiagramUnit;
+  index: number;
+  pngOptions: PngControlOptions;
+  onChangePngOptions: (opts: PngControlOptions) => void;
+}
+
+function safeHeading(unit: DiagramUnit): { title: string; subtitle?: string } {
+  if (unit.heading?.title) return unit.heading;
+  return { title: `Diagram ${unit.index + 1}` };
+}
+
+export const DiagramPanel: React.FC<DiagramPanelProps> = ({ unit, index, pngOptions, onChangePngOptions }) => {
+  const { title, subtitle } = safeHeading(unit);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [status, setStatus] = useState<string>('Rendering…');
   const [error, setError] = useState<string | null>(null);
 
-  const diagramType = useMemo(() => {
-    const candidate = diagram.metadata?.diagram_type;
-    if (candidate && SUPPORTED_TYPES.has(candidate as SupportedDiagramType)) {
-      return candidate as SupportedDiagramType;
-    }
-    return DEFAULT_DIAGRAM_TYPE;
-  }, [diagram.metadata?.diagram_type]);
+  const mermaidSource = useMemo(() => basicSanitize(unit.mermaid ?? ''), [unit.mermaid]);
 
   useEffect(() => {
     let cancelled = false;
     const render = async () => {
+      if (!mermaidSource) {
+        setStatus('No source');
+        setError('Missing Mermaid source');
+        return;
+      }
       setStatus('Rendering…');
       setError(null);
-      const source = basicSanitize(diagram.mermaid);
       try {
         const mermaid = (await import('mermaid')).default;
-        // Initialize and suppress Mermaid's own error SVG
         try {
-          // @ts-ignore
-          mermaid.initialize({ startOnLoad: false, theme: 'default', suppressErrorRenderer: true });
+          mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'strict', suppressErrorRenderer: true } as any);
         } catch {
-          mermaid.initialize({ startOnLoad: false, theme: 'default' });
+          mermaid.initialize?.({ startOnLoad: false, theme: 'default', securityLevel: 'strict' });
         }
 
-        // Patch render to never inject the bomb SVG
-        const originalRender = (mermaid as any)._patchedRender || mermaid.render.bind(mermaid);
-        if (!(mermaid as any)._patchedRender) {
-          (mermaid as any)._patchedRender = originalRender;
-          mermaid.render = (async function (id: string, code: string, ...args: any[]) {
-            try { return await originalRender(id, code, ...args); }
-            catch (e: any) {
-              console.warn('[Mermaid suppressed]', e?.message || String(e));
-              return { svg: '', bindFunctions: () => {} } as any;
-            }
-          }) as any;
-        }
-
-        if (cancelled) return;
         const container = containerRef.current;
-        if (!container) return;
+        if (!container || cancelled) return;
         container.innerHTML = '';
 
-        // Validate before rendering; skip DOM injection on failure
         try {
-          // @ts-ignore parse at runtime
-          mermaid.parse(source);
+          // @ts-ignore parse exists at runtime
+          mermaid.parse(mermaidSource);
         } catch (e: any) {
           if (cancelled) return;
           setError(e?.message ?? 'Mermaid parse error');
-          setStatus('Render blocked due to syntax error.');
-          container.innerHTML = `
-            <div class="rounded-md border border-neutral-200 bg-neutral-50 p-2 text-sm text-red-600">
-              Diagram failed to render. Check syntax in console.
-            </div>`;
+          setStatus('Render blocked (parse error)');
+          container.innerHTML = `<div class="rounded border border-neutral-200 bg-red-50 p-2 text-sm text-red-600">Diagram failed to render.</div>`;
           return;
         }
 
-        const { svg } = await mermaid.render(`m-${Date.now()}`, source);
+        const { svg } = await mermaid.render(`m-${Date.now()}-${index}`, mermaidSource);
         if (cancelled) return;
-        // Detect Mermaid's fallback error SVG and avoid injecting it
-        const isErrorSvg = !svg || /syntax\s+error/i.test(svg) || /mermaid\s+version/i.test(svg) || /<div[^>]+class=["']?error["']?/i.test(svg);
-        if (isErrorSvg) {
-          setError('Mermaid parse error');
-          setStatus('Render blocked due to syntax error.');
-          container.innerHTML = `
-            <div class="rounded-md border border-neutral-200 bg-neutral-50 p-2 text-sm text-red-600">
-              Diagram failed to render. Check syntax in console.
-            </div>`;
-          return;
-        }
-        container.innerHTML = svg;
-        const iters = (diagram as any)?.metadata?.refined_iterations;
-        setStatus(
-          typeof iters === 'number' ? `Rendered (server refined in ${iters} step${iters === 1 ? '' : 's'})` : 'Rendered'
-        );
+        container.innerHTML = svg ?? '';
+        setStatus('Rendered');
       } catch (err: any) {
         if (cancelled) return;
         setError(err?.message ?? 'Mermaid render error');
         setStatus('Rendering failed.');
         const container = containerRef.current;
         if (container) {
-          container.innerHTML = `
-            <div class="rounded-md border border-neutral-200 bg-neutral-50 p-2 text-sm text-red-600">
-              Diagram failed to render. Check syntax in console.
-            </div>`;
+          container.innerHTML = `<div class="rounded border border-neutral-200 bg-red-50 p-2 text-sm text-red-600">Diagram failed to render.</div>`;
         }
       }
     };
@@ -104,85 +83,39 @@ export default function DiagramView({ diagram }: { diagram: Diagram }) {
     return () => {
       cancelled = true;
     };
-  }, [diagram.mermaid, diagramType]);
-
-  async function exportSVG() {
-    const el = containerRef.current?.querySelector('svg');
-    if (!el) return;
-    const blob = new Blob([el.outerHTML], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${diagram.title ?? 'diagram'}.svg`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  async function exportPDF() {
-    const svg = containerRef.current?.querySelector('svg');
-    if (!svg) return;
-
-    async function loadScriptOnce(src: string, id: string) {
-      if (document.getElementById(id)) return;
-      await new Promise<void>((resolve, reject) => {
-        const s = document.createElement('script');
-        s.id = id; s.async = true; s.src = src;
-        s.onload = () => resolve();
-        s.onerror = () => reject(new Error(`Failed to load ${src}`));
-        document.head.appendChild(s);
-      });
-    }
-
-    // Always use UMD builds to avoid Next dev chunk errors
-    await loadScriptOnce('https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js', 'jspdf-umd');
-    await loadScriptOnce('https://cdn.jsdelivr.net/npm/svg2pdf.js@2.2.2/dist/svg2pdf.umd.min.js', 'svg2pdf-umd');
-    // @ts-ignore
-    const jsPDF = (window as any).jspdf?.jsPDF;
-    // @ts-ignore
-    const svg2pdf = (window as any).svg2pdf || (window as any).svg2pdfjs || (window as any).svg2pdf?.default;
-    if (!jsPDF || !svg2pdf) throw new Error('PDF libraries not available');
-    const pdf = new jsPDF({ unit: 'pt', format: 'a4' });
-    const pageWidth = pdf.internal.pageSize.getWidth();
-    const pageHeight = pdf.internal.pageSize.getHeight();
-    const bbox = svg.getBBox();
-    const scale = Math.min((pageWidth - 40) / bbox.width, (pageHeight - 40) / bbox.height);
-    // @ts-ignore
-    svg2pdf(svg, pdf, { x: 20, y: 20, width: bbox.width * scale, height: bbox.height * scale });
-    pdf.save(`${diagram.title ?? 'diagram'}.pdf`);
-  }
+  }, [mermaidSource, index]);
 
   return (
-    <section className="space-y-3">
+    <article className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm space-y-3">
       <header className="space-y-1">
-        <h2 className="text-xl font-semibold">{diagram.title ?? 'Generated Diagram'}</h2>
-        {diagram.description && <p className="text-sm text-gray-600">{diagram.description}</p>}
-        <p className="text-xs text-neutral-500">
-          Type: {diagramType} · {status}
-        </p>
+        <h3 className="text-lg font-semibold">{title}</h3>
+        {subtitle ? <p className="text-sm text-neutral-600">{subtitle}</p> : null}
+        <p className="text-xs text-neutral-500">Status: {status}</p>
       </header>
-      {error && (
+      {unit.summaryBullets?.length ? (
+        <ul className="list-disc pl-5 text-sm text-neutral-700">
+          {unit.summaryBullets.map((line, idx) => (
+            <li key={idx}>{line}</li>
+          ))}
+        </ul>
+      ) : null}
+      {error ? (
         <div className="rounded border border-red-300 bg-red-50 p-3 text-sm text-red-700">
           {error}
         </div>
-      )}
-      <div ref={containerRef} className="overflow-auto rounded border bg-white p-3" />
-      {error && (
-        <details className="rounded border border-yellow-200 bg-yellow-50 p-3 text-xs text-yellow-900">
-          <summary className="cursor-pointer font-medium">Mermaid source</summary>
-          <pre className="mt-2 whitespace-pre-wrap">{basicSanitize(diagram.mermaid)}</pre>
-        </details>
-      )}
-      <div className="flex gap-3">
-        <button onClick={exportSVG} className="rounded border px-4 py-2">
-          Export SVG
-        </button>
-        <button onClick={exportPDF} className="rounded border px-4 py-2">
-          Export PDF
-        </button>
-        {!error && typeof (diagram as any)?.metadata?.refined_iterations === 'number' && (
-          <span className="self-center text-xs text-neutral-500">Iterations: {(diagram as any).metadata.refined_iterations}</span>
-        )}
-      </div>
-    </section>
+      ) : null}
+      <div ref={containerRef} className="overflow-auto rounded border bg-neutral-50 p-3" />
+      <ExportButtons
+        title={title}
+        containerRef={containerRef}
+        mermaidSource={unit.mermaid ?? ''}
+        options={pngOptions}
+        onOptionsChange={onChangePngOptions}
+      />
+      <details className="rounded border border-neutral-200 bg-neutral-50 p-3 text-xs text-neutral-700">
+        <summary className="cursor-pointer font-medium">Mermaid source</summary>
+        <pre className="mt-2 whitespace-pre-wrap">{mermaidSource}</pre>
+      </details>
+    </article>
   );
-}
+};

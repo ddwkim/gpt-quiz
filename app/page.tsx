@@ -1,9 +1,10 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import DiagramView from "@/components/Diagram";
+import { DiagramGallery } from "@/components/DiagramGallery";
+import { DiagramSplitControls } from "@/components/DiagramSplitControls";
 import QuizView from "@/components/Quiz";
-import type { Diagram } from "@/lib/diagram";
+import { DiagramPackSchema, DiagramSplitConfigSchema, type DiagramPack, type DiagramSplitConfig } from "@/lib/diagram";
 import type { Quiz } from "@/lib/types";
 
 // Shared Card component for consistent styling
@@ -61,14 +62,16 @@ async function generateQuiz({
 async function generateDiagram({
   shareLink,
   form,
+  split
 }: {
   shareLink: string;
   form: any;
+  split: DiagramSplitConfig;
 }) {
   const res = await fetch("/api/diagram", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ shareUrl: shareLink, config: form }),
+    body: JSON.stringify({ shareUrl: shareLink, config: { ...form, split } }),
   });
   const text = await res.text();
   let data: any = null;
@@ -82,7 +85,11 @@ async function generateDiagram({
       data?.error?.message ?? (typeof data === "string" ? data : text) ?? "Diagram generation failed";
     throw new Error(message);
   }
-  return (data ?? {}) as Diagram;
+  const parsed = DiagramPackSchema.safeParse(data ?? {});
+  if (!parsed.success) {
+    throw new Error("Unexpected diagram response format");
+  }
+  return parsed.data as DiagramPack;
 }
 
 function Select({
@@ -394,64 +401,60 @@ function GenerateDiagramCard({
   onDiagram,
   manualMode,
   manualTranscript,
+  splitConfig,
+  onSplitConfigChange,
+  onStatus,
 }: {
   sharedLink: string;
   isValidLink: boolean;
-  onDiagram: React.Dispatch<React.SetStateAction<Diagram | null>>;
+  onDiagram: React.Dispatch<React.SetStateAction<DiagramPack | null>>;
   manualMode: boolean;
   manualTranscript: string;
+  splitConfig: DiagramSplitConfig;
+  onSplitConfigChange: (value: DiagramSplitConfig) => void;
+  onStatus: (state: { loading: boolean; error: string | null }) => void;
 }) {
-  const [type, setType] = useState<"flowchart" | "sequence" | "class" | "er" | "state" | "mindmap">("flowchart");
-  const [focus, setFocus] = useState<"overview" | "process" | "concept">("overview");
-  const [lang, setLang] = useState<"en" | "ko">("en");
+  const type: 'flowchart' = 'flowchart';
+  const [focus, setFocus] = useState<'overview' | 'process' | 'concept'>('overview');
+  const [lang, setLang] = useState<'en' | 'ko'>('en');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
   const disabled = !isValidLink || busy;
 
-  const typeHelp: Record<typeof type, string> = {
-    flowchart: "Process flow: boxes and arrows for step‑by‑step logic.",
-    sequence: "Interaction timeline: who talks to whom, and when.",
-    class: "Data model: types, fields, and relationships.",
-    er: "Entities & relationships: tables/entities and how they link.",
-    state: "States & transitions: lifecycle and allowed changes.",
-    mindmap: "Idea map: nested nodes showing concepts and parts.",
-  } as any;
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setMessage(null);
     setBusy(true);
+    onStatus({ loading: true, error: null });
     try {
-      let result: any;
+      let pack: DiagramPack;
       if (manualMode) {
-        const res = await fetch("/api/diagram", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ transcript: manualTranscript, config: { type, focus, lang } }),
+        const res = await fetch('/api/diagram', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ transcript: manualTranscript, config: { type, focus, lang, split: splitConfig } })
         });
         const txt = await res.text();
         let data: any = null;
         try {
           data = txt ? JSON.parse(txt) : null;
         } catch {}
-        if (!res.ok) throw new Error(data?.error?.message ?? txt ?? "Diagram generation failed");
-        result = data;
+        if (!res.ok) throw new Error(data?.error?.message ?? txt ?? 'Diagram generation failed');
+        const parsed = DiagramPackSchema.safeParse(data ?? {});
+        if (!parsed.success) throw new Error('Unexpected diagram response format');
+        pack = parsed.data;
       } else {
-        result = await generateDiagram({ shareLink: sharedLink, form: { type, focus, lang } });
+        pack = await generateDiagram({ shareLink: sharedLink, form: { type, focus, lang }, split: splitConfig });
       }
-      onDiagram({
-        ...result,
-        metadata: {
-          ...(result.metadata ?? {}),
-          diagram_type: type,
-        },
-      } as Diagram);
-      setMessage(result?.title ? `Diagram generated: ${result.title}` : "Diagram generated successfully.");
+      onDiagram(pack);
+      setMessage(`Generated ${pack.meta.k} diagram${pack.meta.k === 1 ? '' : 's'}.`);
+      onStatus({ loading: false, error: null });
     } catch (err: any) {
-      setError(err?.message ?? "Diagram generation failed");
+      setError(err?.message ?? 'Diagram generation failed');
+      onStatus({ loading: false, error: err?.message ?? 'Diagram generation failed' });
     } finally {
       setBusy(false);
     }
@@ -460,21 +463,7 @@ function GenerateDiagramCard({
   return (
     <Card title="Generate Diagram" description="Create a Mermaid diagram that summarizes the transcript visually.">
       <form onSubmit={handleSubmit} className="space-y-4">
-        <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-3">
-          <div>
-            <label htmlFor="diagram-type" className="block text-sm font-medium">
-              Type
-            </label>
-            <Select id="diagram-type" value={type} onChange={(e) => setType(e.target.value as any)}>
-              <option value="flowchart">flowchart</option>
-              <option value="sequence">sequence</option>
-              <option value="class">class</option>
-              <option value="er">er</option>
-              <option value="state">state</option>
-              <option value="mindmap">mindmap</option>
-            </Select>
-            <p className="mt-1 text-xs text-neutral-600">{typeHelp[type]}</p>
-          </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
             <label htmlFor="diagram-focus" className="block text-sm font-medium">
               Focus
@@ -494,17 +483,18 @@ function GenerateDiagramCard({
               <option value="ko">Korean</option>
             </Select>
           </div>
-          <div className="sm:col-span-3 mt-2 flex items-center gap-3">
-            <button
-              type="submit"
-              disabled={disabled}
-              className="inline-flex items-center justify-center h-10 px-4 rounded-lg bg-black text-white whitespace-nowrap max-w-max shrink-0 disabled:opacity-50"
-            >
-              {busy ? "Generating…" : "Generate Diagram"}
-            </button>
-            {error && <span className="text-sm text-red-600">{error}</span>}
-            {!error && message && <span className="text-sm text-green-600">{message}</span>}
-          </div>
+        </div>
+        <DiagramSplitControls value={splitConfig} onChange={onSplitConfigChange} />
+        <div className="flex items-center gap-3">
+          <button
+            type="submit"
+            disabled={disabled}
+            className="inline-flex items-center justify-center h-10 px-4 rounded-lg bg-black text-white whitespace-nowrap max-w-max shrink-0 disabled:opacity-50"
+          >
+            {busy ? 'Generating…' : 'Generate Diagram'}
+          </button>
+          {error && <span className="text-sm text-red-600">{error}</span>}
+          {!error && message && <span className="text-sm text-green-600">{message}</span>}
         </div>
       </form>
     </Card>
@@ -515,13 +505,16 @@ export default function Page() {
   const [sharedLink, setSharedLink] = useState("");
   const [isValidLink, setIsValidLink] = useState(false);
   const [quiz, setQuiz] = useState<Quiz | null>(null);
-  const [diagram, setDiagram] = useState<Diagram | null>(null);
+  const [diagramPack, setDiagramPack] = useState<DiagramPack | null>(null);
+  const [diagramStatus, setDiagramStatus] = useState<{ loading: boolean; error: string | null }>({ loading: false, error: null });
+  const [splitConfig, setSplitConfig] = useState<DiagramSplitConfig>(() => DiagramSplitConfigSchema.parse({}));
   const [manualMode, setManualMode] = useState(false);
   const [manualTranscript, setManualTranscript] = useState("");
 
   useEffect(() => {
     setQuiz(null);
-    setDiagram(null);
+    setDiagramPack(null);
+    setDiagramStatus({ loading: false, error: null });
   }, [sharedLink]);
 
   return (
@@ -555,15 +548,18 @@ export default function Page() {
         <GenerateDiagramCard
           sharedLink={sharedLink}
           isValidLink={isValidLink}
-          onDiagram={setDiagram}
+          onDiagram={setDiagramPack}
           manualMode={manualMode}
           manualTranscript={manualTranscript}
+          splitConfig={splitConfig}
+          onSplitConfigChange={setSplitConfig}
+          onStatus={setDiagramStatus}
         />
       </div>
 
       <div className="space-y-6">
         {quiz && <QuizView quiz={quiz} />}
-        {diagram && <DiagramView diagram={diagram} />}
+        <DiagramGallery pack={diagramPack} loading={diagramStatus.loading} error={diagramStatus.error} />
       </div>
     </main>
   );

@@ -37,7 +37,7 @@ export const DiagramIRSchema = {
         type: 'array',
         items: {
           type: 'object',
-          required: ['id', 'label'],
+          required: ['id'],
           additionalProperties: false,
           properties: {
             id: { type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$' },
@@ -48,9 +48,18 @@ export const DiagramIRSchema = {
               minItems: 1,
               maxItems: 6
             },
-            shape: { enum: ['rect', 'decision', 'terminator', 'io', 'db', 'subroutine', 'stadium', 'circle', 'double_circle', 'hexagon', 'parallelogram', 'trap'] },
+            shape: { enum: ['rect', 'decision', 'terminator'] },
             weight: { type: 'number' },
             group: { type: 'string', maxLength: 60 },
+            bridge: {
+              type: 'object',
+              required: ['toDiagram', 'targetLabel'],
+              additionalProperties: false,
+              properties: {
+                toDiagram: { type: 'integer', minimum: 0 },
+                targetLabel: { type: 'string', maxLength: 80 }
+              }
+            },
             evidence: {
               type: 'array',
               items: {

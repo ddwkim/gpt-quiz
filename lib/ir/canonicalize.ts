@@ -28,6 +28,9 @@ export function canonicalizeIR(ir: IR): IR {
   for (const n of ir.nodes) {
     const newId = sanitizeId(n.id);
     map.set(n.id, newId); n.id = newId;
+    if (!n.shape || (n.shape !== 'rect' && n.shape !== 'decision' && n.shape !== 'terminator')) {
+      n.shape = 'rect';
+    }
     const segmentsSource = n.labelLines && n.labelLines.length > 0 ? n.labelLines : [n.label ?? ''];
     const segments = segmentsSource
       .map((seg) => sanitizeSegment(seg))
@@ -41,6 +44,17 @@ export function canonicalizeIR(ir: IR): IR {
     }
     n.label = segments[0].slice(0, 60);
     if (n.label.length === 0) n.label = newId;
+    if (n.group) {
+      const sanitizedGroup = sanitizeSegment(n.group, 60);
+      if (sanitizedGroup) n.group = sanitizedGroup;
+      else delete n.group;
+    }
+    if (n.bridge) {
+      n.bridge = {
+        toDiagram: Math.max(0, Number.isFinite(n.bridge.toDiagram) ? Math.floor(n.bridge.toDiagram) : 0),
+        targetLabel: sanitizeSegment(n.bridge.targetLabel ?? '', 60) || n.label
+      };
+    }
   }
   ir.edges = ir.edges
     .map(e => ({...e, from: map.get(e.from) ?? e.from, to: map.get(e.to) ?? e.to}))

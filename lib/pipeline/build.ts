@@ -1,7 +1,6 @@
-import { canonicalizeIR, sanitizeId } from '@/lib/ir/canonicalize';
-import type { DiagramIR, Direction } from '@/lib/mermaid/schema';
+import type { DiagramIR, Direction, MultiDiagramPack } from '@/lib/mermaid/schema';
 import { compileToMermaid } from '@/lib/mermaid/compiler';
-import { sanitizeMermaid, renderSVG } from '@/lib/mermaid/runtime';
+import { sanitizeMermaid } from '@/lib/mermaid/runtime';
 import { validateMermaid } from '@/lib/mermaid/validate';
 import { checkStaticMermaid, type StaticIssue } from '@/lib/mermaid/check';
 import { fixByToken, fixByArity, fixByBlock, fixTokenIssues } from '@/lib/mermaid/mutators';
@@ -14,6 +13,9 @@ import { expandIR } from '@/lib/agents/diagram_expand';
 import { emitDiagramMetrics } from '@/lib/metrics/telemetry';
 import mermaidPkg from 'mermaid/package.json';
 import { performance } from 'node:perf_hooks';
+import { canonicalizeIR, sanitizeId } from '@/lib/ir/canonicalize';
+import { partitionIR, type PartitionMode } from './partition';
+import type { IR } from '@/lib/ir/schema';
 
 const MODEL = process.env.MERMAID_MODEL || process.env.MERMAID_REFINER_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const MAX_ITERS = Number(process.env.MERMAID_MAX_ITERS ?? process.env.MAX_MERMAID_REFINES ?? 3);
@@ -22,7 +24,23 @@ const APP_VERSION = process.env.APP_VERSION || 'dev';
 const MERMAID_VERSION = (mermaidPkg as { version?: string }).version ?? 'unknown';
 
 export type Reason = RefineReason;
-export type BuildOk = { ok: true; svg: string; mermaid: string; ir: DiagramIR; reasons: Reason[]; iterations: number };
+
+export interface SplitSettings {
+  mode: PartitionMode;
+  maxNodes: number;
+  maxEdges: number;
+  targetDensity?: number;
+  maxBridges?: number;
+  k?: number;
+}
+
+export interface BuildOptions {
+  direction?: Direction;
+  split?: SplitSettings;
+}
+
+export type CompiledDiagram = { index: number; mermaid: string; svg?: string };
+export type BuildOk = { ok: true; pack: MultiDiagramPack; diagrams: CompiledDiagram[]; reasons: Reason[]; iterations: number };
 export type BuildErr = { ok: false; error: string; lastMermaid: string; ir?: DiagramIR; reasons: Reason[]; iterations: number };
 
 type Renderer = 'dagre' | 'elk';
@@ -47,10 +65,28 @@ type SolveOptions = {
   enforceBudgets?: BudgetEnforcer;
 };
 
-function cloneIR<T>(value: T): T {
-  if (typeof structuredClone === 'function') {
-    return structuredClone(value);
-  }
+const DEFAULT_SPLIT: SplitSettings = {
+  mode: 'none',
+  maxNodes: 18,
+  maxEdges: 22,
+  targetDensity: 1.1,
+  maxBridges: 6
+};
+
+function normalizeSplit(split?: SplitSettings): SplitSettings {
+  if (!split) return { ...DEFAULT_SPLIT };
+  return {
+    mode: split.mode ?? 'none',
+    maxNodes: Math.max(4, split.maxNodes || DEFAULT_SPLIT.maxNodes),
+    maxEdges: Math.max(4, split.maxEdges || DEFAULT_SPLIT.maxEdges),
+    targetDensity: split.targetDensity ?? DEFAULT_SPLIT.targetDensity,
+    maxBridges: split.maxBridges ?? DEFAULT_SPLIT.maxBridges,
+    k: split.k
+  };
+}
+
+function clone<T>(value: T): T {
+  if (typeof structuredClone === 'function') return structuredClone(value);
   return JSON.parse(JSON.stringify(value));
 }
 
@@ -181,19 +217,11 @@ function emitMetrics(ir: DiagramIR, reasons: Reason[], iterations: number, rende
   });
 }
 
-async function renderSafe(mermaid: string): Promise<string> {
-  try {
-    return await renderSVG(mermaid);
-  } catch {
-    return '';
-  }
-}
-
 function materializeMustInclude(ir: DiagramIR, mustInclude: string[] = []): DiagramIR {
   if (!mustInclude.length) return ir;
-  const next = cloneIR(ir);
+  const next = clone(ir);
   const byId = new Set(next.nodes.map((n) => n.id.toLowerCase()));
-  const byLabel = new Set(next.nodes.map((n) => n.label.toLowerCase()));
+  const byLabel = new Set(next.nodes.map((n) => (n.label ?? '').toLowerCase()));
   let suffix = 0;
   for (const raw of mustInclude) {
     const term = raw.trim();
@@ -224,12 +252,12 @@ function computeDegree(ir: DiagramIR): Map<string, number> {
 
 function enforceBudgets(ir: DiagramIR, maxNodes: number, maxEdges: number, mustInclude: string[] = []): DiagramIR {
   if (ir.nodes.length <= maxNodes && ir.edges.length <= maxEdges) return ir;
-  const next = cloneIR(ir);
+  const next = clone(ir);
   const mustSet = new Set(mustInclude.map((s) => s.toLowerCase()));
   const degree = computeDegree(next);
   const keep = new Set<string>();
   for (const node of next.nodes) {
-    if (mustSet.has(node.id.toLowerCase()) || mustSet.has(node.label.toLowerCase())) keep.add(node.id);
+    if (mustSet.has((node.id ?? '').toLowerCase()) || mustSet.has((node.label ?? '').toLowerCase())) keep.add(node.id);
     if (node.shape === 'decision') keep.add(node.id);
     if ((degree.get(node.id) ?? 0) >= 4) keep.add(node.id);
   }
@@ -238,7 +266,7 @@ function enforceBudgets(ir: DiagramIR, maxNodes: number, maxEdges: number, mustI
     for (const node of sorted) {
       if (next.nodes.length <= maxNodes) break;
       if (keep.has(node.id)) continue;
-      const lowerLabel = node.label.toLowerCase();
+      const lowerLabel = (node.label ?? '').toLowerCase();
       if (mustSet.has(lowerLabel)) {
         keep.add(node.id);
         continue;
@@ -274,7 +302,7 @@ function createBudgetEnforcer(focus: FocusProfile): BudgetEnforcer {
 
 async function solveDiagram(initialIR: DiagramIR, options: SolveOptions): Promise<SolveResult> {
   const reasons = options.reasons;
-  let working = cloneIR(initialIR);
+  let working = clone(initialIR);
   let attempt = 0;
   let lastMermaid = '';
   let compileMs = 0;
@@ -286,7 +314,7 @@ async function solveDiagram(initialIR: DiagramIR, options: SolveOptions): Promis
     if (options.enforceBudgets) {
       working = options.enforceBudgets(working);
     }
-    const canonical = canonicalizeIR(cloneIR(working));
+    const canonical = canonicalizeIR(clone(working));
     renderer = chooseRenderer(canonical);
     const result = await compileAndValidate(canonical);
     lastMermaid = result.mermaid;
@@ -343,7 +371,44 @@ async function solveDiagram(initialIR: DiagramIR, options: SolveOptions): Promis
   return { ok: false, ir: working, mermaid: lastMermaid, iterations: attempt, compileMs, parseMs, renderer, error: lastError || 'Unknown Mermaid parse error' };
 }
 
-export async function buildMermaidFromSpec(spec: string, direction: Direction = 'TB'): Promise<BuildOk | BuildErr> {
+function mapSplitToPartition(split: SplitSettings): { mode: PartitionMode; count?: number } & { budgets: { maxNodes: number; maxEdges: number; targetDensity?: number; maxBridges?: number } } {
+  return {
+    mode: split.mode,
+    count: split.mode === 'byCount' ? split.k : undefined,
+    budgets: {
+      maxNodes: split.maxNodes,
+      maxEdges: split.maxEdges,
+      targetDensity: split.targetDensity,
+      maxBridges: split.maxBridges
+    }
+  };
+}
+
+async function finalizePack(ir: DiagramIR, split: SplitSettings): Promise<{ ok: true; pack: MultiDiagramPack; compiled: CompiledDiagram[]; aggregateCompileMs: number; aggregateParseMs: number } | { ok: false; error: string; lastMermaid: string }>
+{
+  const partitionOptions = mapSplitToPartition(split);
+  const pack = partitionIR(ir, partitionOptions);
+  const compiled: CompiledDiagram[] = [];
+  let totalCompile = 0;
+  let totalParse = 0;
+
+  for (const unit of pack.diagrams) {
+    const result = await compileAndValidate(unit.ir);
+    totalCompile += result.compileMs;
+    totalParse += result.parseMs;
+    if (!result.validation.ok) {
+      return { ok: false, error: result.validation.message, lastMermaid: result.mermaid };
+    }
+    compiled.push({ index: unit.index, mermaid: result.mermaid });
+    unit.mermaid = result.mermaid;
+  }
+
+  return { ok: true, pack, compiled, aggregateCompileMs: totalCompile, aggregateParseMs: totalParse };
+}
+
+export async function buildMermaidFromSpec(spec: string, options?: BuildOptions): Promise<BuildOk | BuildErr> {
+  const split = normalizeSplit(options?.split);
+  const direction: Direction = options?.direction ?? 'TB';
   const reasons: Reason[] = [];
   let ir: DiagramIR | undefined;
   let lastMermaid = '';
@@ -354,20 +419,24 @@ export async function buildMermaidFromSpec(spec: string, direction: Direction = 
     return { ok: false, error: String(error?.message ?? error), lastMermaid: '', reasons, iterations: 0 };
   }
 
-  const result = await solveDiagram(ir, { model: MODEL, maxRefine: MAX_ITERS, reasons });
-  if (result.ok) {
-    emitMetrics(result.ir, reasons, result.iterations, result.renderer, result.compileMs, result.parseMs);
-    const svg = await renderSafe(result.mermaid);
-    return { ok: true, svg, mermaid: result.mermaid, ir: result.ir, reasons, iterations: result.iterations };
+  const solve = await solveDiagram(ir, { model: MODEL, maxRefine: MAX_ITERS, reasons });
+  if (!solve.ok) {
+    return { ok: false, error: solve.error, lastMermaid: solve.mermaid, ir: solve.ir, reasons, iterations: solve.iterations };
   }
 
-  lastMermaid = result.mermaid;
-  return { ok: false, error: result.error, lastMermaid, ir: result.ir, reasons, iterations: result.iterations };
+  const final = await finalizePack(solve.ir, split);
+  if (!final.ok) {
+    return { ok: false, error: final.error, lastMermaid: final.lastMermaid, ir: solve.ir, reasons, iterations: solve.iterations };
+  }
+
+  emitMetrics(solve.ir, reasons, solve.iterations, solve.renderer, solve.compileMs + final.aggregateCompileMs, solve.parseMs + final.aggregateParseMs);
+  return { ok: true, pack: final.pack, diagrams: final.compiled, reasons, iterations: solve.iterations };
 }
 
-export async function buildMermaidFocused(fullTranscript: string, focus: FocusProfile): Promise<BuildOk | BuildErr> {
+export async function buildMermaidFocused(fullTranscript: string, focus: FocusProfile, splitOverride?: SplitSettings): Promise<BuildOk | BuildErr> {
   const reasons: Reason[] = [];
   const direction = focus.direction ?? 'TB';
+  const split = normalizeSplit(splitOverride);
   const { excerpt } = selectForFocus(fullTranscript, focus);
   const outlineMaxN = Math.min(6, focus.maxNodes ?? 12);
   const outlineMaxE = Math.min(8, focus.maxEdges ?? Math.max(16, Math.round(1.5 * (focus.maxNodes ?? 12))));
@@ -406,16 +475,15 @@ export async function buildMermaidFocused(fullTranscript: string, focus: FocusPr
 
     const headroomNodes = (focus.maxNodes ?? 12) - solved.ir.nodes.length;
     const headroomEdges = (focus.maxEdges ?? Math.max(16, Math.round(1.5 * (focus.maxNodes ?? 12)))) - solved.ir.edges.length;
-    if (headroomNodes <= 0 && headroomEdges <= 0) {
-      emitMetrics(solved.ir, reasons, totalIterations, solved.renderer, solved.compileMs, solved.parseMs);
-      const svg = await renderSafe(solved.mermaid);
-      return { ok: true, svg, mermaid: solved.mermaid, ir: solved.ir, reasons, iterations: totalIterations };
-    }
+    const canExpand = headroomNodes > 0 || headroomEdges > 0;
 
-    if (available <= 0) {
-      emitMetrics(solved.ir, reasons, totalIterations, solved.renderer, solved.compileMs, solved.parseMs);
-      const svg = await renderSafe(solved.mermaid);
-      return { ok: true, svg, mermaid: solved.mermaid, ir: solved.ir, reasons, iterations: totalIterations };
+    if (!canExpand || available <= 0) {
+      const final = await finalizePack(solved.ir, split);
+      if (!final.ok) {
+        return { ok: false, error: final.error, lastMermaid: final.lastMermaid, ir: solved.ir, reasons, iterations: totalIterations };
+      }
+      emitMetrics(solved.ir, reasons, totalIterations, solved.renderer, solved.compileMs + final.aggregateCompileMs, solved.parseMs + final.aggregateParseMs);
+      return { ok: true, pack: final.pack, diagrams: final.compiled, reasons, iterations: totalIterations };
     }
 
     const targetN = Math.min(solved.ir.nodes.length + Math.ceil((focus.maxNodes ?? 12) / 3), focus.maxNodes ?? 12);
@@ -436,5 +504,5 @@ export async function buildMermaidFocused(fullTranscript: string, focus: FocusPr
     );
   }
 
-  return { ok: false, error: 'Focus build exhausted refinement budget', lastMermaid: '', ir: working, reasons, iterations: totalIterations };
+  return { ok: false, error: 'Focus build exhausted refinement budget', lastMermaid: '', ir: canonicalizeIR(working), reasons, iterations: totalIterations };
 }
