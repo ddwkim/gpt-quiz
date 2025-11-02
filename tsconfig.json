@@ -20,6 +20,12 @@
       "@/components/*": [
         "components/*"
       ],
+      "@/types/*": [
+        "types/*"
+      ],
+      "@/styles/*": [
+        "styles/*"
+      ],
       "@/prompts/*": [
         "prompts/*"
       ],

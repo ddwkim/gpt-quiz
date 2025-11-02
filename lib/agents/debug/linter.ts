@@ -1,4 +1,5 @@
 import { callJson } from '@/lib/openai-client';
+import { loadPrompt } from '@/lib/prompts';
 
 const LintSchema = {
   name: 'mermaid_lints',
@@ -47,12 +48,7 @@ const LintSchema = {
   }
 } as const;
 
-const SYSTEM = `
-You lint Mermaid v10 source and suggest safe fixes. Return ONLY JSON per schema.
-Guidelines:
-- Be conservative; avoid intrusive changes. Prefer quoting labels, adding header, or closing blocks.
-- Provide short examples in fix.example when helpful.
-`;
+const linterSystemPrompt = loadPrompt('debug-linter.system.md');
 
 export async function debugLint(
   model: string,
@@ -62,7 +58,7 @@ export async function debugLint(
   const snippet = source.slice(0, 2000);
   const user = [`Diagram type: ${type}`, 'Source:', snippet].join('\n\n');
   const out = await callJson({
-    system: SYSTEM,
+    system: linterSystemPrompt,
     user,
     schema: LintSchema,
     model,

@@ -1,4 +1,5 @@
 import { callJson } from '@/lib/openai-client';
+import { loadPrompt } from '@/lib/prompts';
 
 const ClassifierSchema = {
   name: 'mermaid_error_classifier',
@@ -31,12 +32,7 @@ const ClassifierSchema = {
   }
 } as const;
 
-const SYSTEM = `
-You classify Mermaid v10 parse errors. Return ONLY JSON following the schema.
-Policy:
-- Use conservative categories. Prefer OTHER when unsure.
-- Summarize briefly. Suggestions must be actionable and syntax-safe.
-`; 
+const classifierSystemPrompt = loadPrompt('debug-classifier.system.md');
 
 export async function debugClassify(
   model: string,
@@ -53,7 +49,7 @@ export async function debugClassify(
   ].join('\n\n');
 
   const out = await callJson({
-    system: SYSTEM,
+    system: classifierSystemPrompt,
     user,
     schema: ClassifierSchema,
     model,

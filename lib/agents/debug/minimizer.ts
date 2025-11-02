@@ -1,12 +1,7 @@
 import { callText } from '@/lib/openai-client';
+import { loadPrompt } from '@/lib/prompts';
 
-const SYSTEM = `
-You minimize Mermaid v10 source to a smallest snippet that reproduces the same parser error. Output Mermaid ONLY (no backticks).
-Rules:
-- Keep the same diagram type.
-- Preserve the specific syntax pattern causing the error.
-- Remove unrelated nodes/edges.
-`;
+const minimizerSystemPrompt = loadPrompt('debug-minimizer.system.md');
 
 export async function debugMinimize(
   model: string,
@@ -21,6 +16,6 @@ export async function debugMinimize(
     source.slice(0, 2000)
   ].join('\n\n');
 
-  const out = await callText({ system: SYSTEM, user, model, temperature: 0, agent: 'MermaidMinimizer' });
+  const out = await callText({ system: minimizerSystemPrompt, user, model, temperature: 0, agent: 'MermaidMinimizer' });
   return { minimal_source: out };
 }

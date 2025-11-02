@@ -1,6 +1,8 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { DiagramGallery } from "@/components/DiagramGallery";
 import { DiagramSplitControls } from "@/components/DiagramSplitControls";
 import QuizView from "@/components/Quiz";
@@ -146,6 +148,11 @@ function LinkInputCard({
 }) {
   const [local, setLocal] = useState(sharedLink);
   const [error, setError] = useState<string | null>(null);
+  const lectureHref = manualMode
+    ? '/study/lecture'
+    : isValidLink && local
+      ? `/study/lecture?share=${encodeURIComponent(local)}`
+      : '/study/lecture';
 
   useEffect(() => {
     setLocal(sharedLink);
@@ -215,6 +222,14 @@ function LinkInputCard({
             />
           </div>
         )}
+        <div className="mt-4 flex flex-wrap gap-3 text-sm">
+          <Link
+            href={lectureHref}
+            className="inline-flex items-center justify-center rounded-lg border border-neutral-300 px-3 py-2 font-medium text-neutral-700 hover:bg-neutral-100"
+          >
+            Open Lecture Builder
+          </Link>
+        </div>
       </div>
     </Card>
   );
@@ -510,6 +525,14 @@ export default function Page() {
   const [splitConfig, setSplitConfig] = useState<DiagramSplitConfig>(() => DiagramSplitConfigSchema.parse({}));
   const [manualMode, setManualMode] = useState(false);
   const [manualTranscript, setManualTranscript] = useState("");
+  const searchParams = useSearchParams();
+
+  useEffect(() => {
+    const share = searchParams.get("share");
+    if (share && share !== sharedLink) {
+      setSharedLink(share);
+    }
+  }, [searchParams, sharedLink]);
 
   useEffect(() => {
     setQuiz(null);
